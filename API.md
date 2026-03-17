@@ -69,6 +69,54 @@ The `changelog` field is Markdown with these sections (only present if non-empty
 - `🐛 Bug Fixes`
 - `🔧 Other Changes`
 
+---
+
+# /api/stripe/checkout
+
+## Endpoint
+
+```
+POST /api/stripe/checkout
+```
+
+## Request Body
+
+Empty — no auth required for MVP.
+
+## Success Response (200)
+
+```json
+{ "url": "https://checkout.stripe.com/..." }
+```
+
+Client should redirect to `url`.
+
+## Error Responses
+
+| Status | Condition |
+|--------|-----------|
+| `503` | Stripe env vars not configured |
+| `500` | Stripe API error |
+
+---
+
+# /api/stripe/webhook
+
+## Endpoint
+
+```
+POST /api/stripe/webhook
+```
+
+Stripe-facing only. Configure in Stripe Dashboard → Webhooks.
+Requires `stripe-signature` header and `STRIPE_WEBHOOK_SECRET` env var.
+
+**Handled events:**
+- `checkout.session.completed` → inserts row in `subscribers` table
+- `customer.subscription.deleted` → sets `active = false` in `subscribers`
+
+---
+
 ## Tips for Gus (Test Notes)
 
 - Test with empty `gitLog` → expect 400
@@ -79,3 +127,6 @@ The `changelog` field is Markdown with these sections (only present if non-empty
 - Test `x-paid-user: true` header bypasses 429
 - Validate `sections` keys always present even if empty arrays
 - Validate `generatedAt` is valid ISO 8601
+- Test `mock: true` present in response when `MOCK_LLM=true`
+- Test `/api/stripe/checkout` returns 503 when `STRIPE_SECRET_KEY` not set
+- Test `/api/stripe/webhook` returns 400 on missing `stripe-signature`
