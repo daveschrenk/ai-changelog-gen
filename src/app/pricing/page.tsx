@@ -1,4 +1,21 @@
+"use client";
+import { useState } from "react";
+
 export default function PricingPage() {
+  const [loading, setLoading] = useState(false);
+
+  async function handleUpgrade() {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/stripe/checkout", { method: "POST" });
+      const { url, error } = await res.json();
+      if (error) throw new Error(error);
+      window.location.href = url;
+    } catch (err) {
+      alert("Could not start checkout. Please try again.");
+      setLoading(false);
+    }
+  }
   return (
     <main className="min-h-screen bg-gray-950 text-gray-100">
       <div className="max-w-4xl mx-auto px-6 py-16">
@@ -46,10 +63,11 @@ export default function PricingPage() {
               <li>✓ Priority support</li>
             </ul>
             <button
-              disabled
-              className="block w-full text-center bg-indigo-600 text-white font-semibold py-3 px-6 rounded-lg opacity-60 cursor-not-allowed"
+              onClick={handleUpgrade}
+              disabled={loading}
+              className="block w-full text-center bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white font-semibold py-3 px-6 rounded-lg transition-colors cursor-pointer"
             >
-              Coming soon
+              {loading ? "Redirecting…" : "Upgrade to Pro →"}
             </button>
           </div>
         </div>

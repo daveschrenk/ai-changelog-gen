@@ -33,3 +33,16 @@ $$;
 
 -- Optional: index for lookups
 create index if not exists usage_ip_month_idx on usage(ip, month);
+
+-- Stripe subscribers (Pro tier)
+create table if not exists subscribers (
+  id uuid primary key default gen_random_uuid(),
+  stripe_customer_id text not null unique,
+  stripe_subscription_id text not null unique,
+  client_ip text,               -- used for IP-based paid tier detection (pre-auth)
+  active boolean not null default true,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists subscribers_ip_idx on subscribers(client_ip) where active = true;

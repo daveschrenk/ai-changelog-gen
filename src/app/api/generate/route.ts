@@ -1,65 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
+import { generateChangelog } from "@/lib/llm";
 import { checkRateLimit } from "@/lib/rateLimit";
 
 /**
  * POST /api/generate
  *
- * Request body:
- * {
- *   gitLog: string;        // Raw git log output (required)
- *   version?: string;      // Version tag for the release (optional, e.g. "v1.2.0")
- *   repoName?: string;     // Repo name for the header (optional)
- * }
- *
- * Response (200):
- * {
- *   changelog: string;     // Markdown-formatted changelog
- *   sections: {
- *     features: string[];
- *     bugFixes: string[];
- *     breakingChanges: string[];
- *     other: string[];
- *   };
- *   version: string;
- *   generatedAt: string;   // ISO timestamp
- * }
- *
- * Error responses:
- * 400 - Missing or invalid input
- * 429 - Free tier limit reached
- * 500 - LLM or server error
+ * See API.md for full documentation.
  */
 
-const client = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY || "",
-  defaultHeaders: {
-    "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
-    "X-Title": "AI Changelog Generator",
-  },
-});
-
-const SYSTEM_PROMPT = `You are a changelog generator. Given a raw git log, produce a polished, human-readable changelog in Markdown.
-
-Rules:
-- Categorize commits into: Features, Bug Fixes, Breaking Changes, Other
-- Use clear, non-technical language where possible
-- Skip merge commits and version bumps
-- Keep entries concise (one line each)
-- If a category has no entries, omit it entirely
-- Output ONLY valid JSON matching the schema below — no extra text
-
-Schema:
-{
-  "sections": {
-    "features": ["string"],
-    "bugFixes": ["string"],
-    "breakingChanges": ["string"],
-    "other": ["string"]
-  },
-  "summary": "One sentence summary of this release"
-}`;
+function getClientIp(req: NextRequest): string {
+  return (
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown"
+  );
+}
 
 function buildMarkdown(
   sections: Record<string, string[]>,
@@ -74,14 +29,14 @@ function buildMarkdown(
 
   const lines: string[] = [header, "", `> ${summary}`, ""];
 
-  const sectionMap: Record<string, string> = {
-    breakingChanges: "⚠️ Breaking Changes",
-    features: "✨ Features",
-    bugFixes: "🐛 Bug Fixes",
-    other: "🔧 Other Changes",
-  };
+  const sectionMap: [string, string][] = [
+    ["breakingChanges", "⚠️ Breaking Changes"],
+    ["features", "✨ Features"],
+    ["bugFixes", "🐛 Bug Fixes"],
+    ["other", "🔧 Other Changes"],
+  ];
 
-  for (const [key, label] of Object.entries(sectionMap)) {
+  for (const [key, label] of sectionMap) {
     const entries = sections[key] ?? [];
     if (entries.length === 0) continue;
     lines.push(`## ${label}`, "");
@@ -94,17 +49,17 @@ function buildMarkdown(
   return lines.join("\n").trim();
 }
 
-function getClientIp(req: NextRequest): string {
-  return (
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip") ||
-    "unknown"
-  );
-}
-
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const body = await req.json().catch(() => null);
+
+    if (!body || typeof body !== "object") {
+      return NextResponse.json(
+        { error: "Request body must be JSON" },
+        { status: 400 }
+      );
+    }
+
     const { gitLog, version = "Unreleased", repoName } = body;
 
     // --- Validation ---
@@ -122,70 +77,51 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // --- Free tier gate ---
-    const isPaid = req.headers.get("x-paid-user") === "true"; // TODO: replace with Stripe session validation
+    // --- Rate limit check (skip for paid users) ---
+    const isPaid = req.headers.get("x-paid-user") === "true"; // TODO: Stripe session validation
+    let rateLimitHeaders: Record<string, string> = {};
+
     if (!isPaid) {
       const ip = getClientIp(req);
-      const { allowed, remaining } = await checkRateLimit(ip);
+      const { allowed, remaining, limit } = await checkRateLimit(ip);
+      rateLimitHeaders = {
+        "X-RateLimit-Limit": String(limit),
+        "X-RateLimit-Remaining": String(remaining),
+      };
+
       if (!allowed) {
         return NextResponse.json(
           {
             error: "Free tier limit reached (5/month). Upgrade to continue.",
             upgradeUrl: `${process.env.NEXT_PUBLIC_APP_URL}/pricing`,
           },
-          {
-            status: 429,
-            headers: { "X-RateLimit-Remaining": "0" },
-          }
+          { status: 429, headers: rateLimitHeaders }
         );
       }
-      // Pass remaining quota through for client awareness
-      void remaining; // used in response headers below
     }
 
     // --- LLM call ---
-    const completion = await client.chat.completions.create({
-      model: "anthropic/claude-3-5-haiku",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: `Git log:\n\`\`\`\n${gitLog.trim()}\n\`\`\``,
-        },
-      ],
-      temperature: 0.3,
-      max_tokens: 2048,
-    });
-
-    const raw = completion.choices[0]?.message?.content ?? "";
-
-    // Parse JSON from LLM response
-    let parsed: { sections: Record<string, string[]>; summary: string };
+    let llmResult;
     try {
-      // Strip potential markdown code fences
-      const jsonStr = raw.replace(/^```json?\n?/m, "").replace(/```$/m, "").trim();
-      parsed = JSON.parse(jsonStr);
-    } catch {
-      console.error("LLM returned non-JSON:", raw);
-      return NextResponse.json(
-        { error: "Failed to parse LLM response", raw },
-        { status: 500 }
-      );
+      llmResult = await generateChangelog(gitLog);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "LLM call failed";
+      return NextResponse.json({ error: message }, { status: 500 });
     }
 
-    const { sections, summary } = parsed;
+    const { sections, summary, mock } = llmResult;
     const changelog = buildMarkdown(sections, summary, version, repoName);
 
-    return NextResponse.json({
-      changelog,
-      sections,
-      version,
-      generatedAt: new Date().toISOString(),
-    }, {
-      headers: {
-        "X-RateLimit-Limit": "5",
-      }
-    });
+    return NextResponse.json(
+      {
+        changelog,
+        sections,
+        version,
+        generatedAt: new Date().toISOString(),
+        ...(mock ? { mock: true } : {}),
+      },
+      { headers: rateLimitHeaders }
+    );
   } catch (err) {
     console.error("/api/generate error:", err);
     return NextResponse.json(
